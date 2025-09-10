@@ -1,0 +1,103 @@
+name: Sync Markdown Issues
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - .github/issues/**
+      - .github/workflows/sync-issues.yml
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync issues from .github/issues/*.md
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            function parseFrontmatter(content) {
+              const fmStart = content.indexOf('\n---');
+              const startsWith = content.startsWith('---');
+              let start = -1, end = -1;
+              if (startsWith) {
+                start = 0;
+                end = content.indexOf('\n---', 3);
+              } else if (fmStart !== -1) {
+                // Not expected, but handle just in case
+                start = fmStart + 1;
+                end = content.indexOf('\n---', start + 3);
+              }
+              if (start !== 0 || end === -1) return { data: {}, body: content };
+              const fmBlock = content.slice(3, end).trim();
+              const body = content.slice(end + 4).trimStart();
+
+              const data = {};
+              const lines = fmBlock.split(/\r?\n/);
+              let currentKey = null;
+              for (const line of lines) {
+                if (/^\s+-\s+/.test(line) && currentKey) {
+                  if (!Array.isArray(data[currentKey])) data[currentKey] = [];
+                  data[currentKey].push(line.replace(/^\s+-\s+/, '').replace(/^"|"$/g, ''));
+                  continue;
+                }
+                const m = line.match(/^(\w+):\s*(.*)$/);
+                if (m) {
+                  currentKey = m[1];
+                  let val = m[2];
+                  if (val === '' || val === undefined) { data[currentKey] = []; continue; }
+                  data[currentKey] = val.replace(/^"|"$/g, '');
+                }
+              }
+              return { data, body };
+            }
+
+            const issuesDir = path.join(process.env.GITHUB_WORKSPACE, '.github', 'issues');
+            if (!fs.existsSync(issuesDir)) {
+              core.info('No issues directory, skipping.');
+              return;
+            }
+
+            const files = fs.readdirSync(issuesDir).filter(f => f.endsWith('.md'));
+            core.info(`Found ${files.length} issue files`);
+
+            for (const f of files) {
+              const full = path.join(issuesDir, f);
+              const content = fs.readFileSync(full, 'utf8');
+              const { data, body } = parseFrontmatter(content);
+              const title = data.title || null;
+              const labels = Array.isArray(data.labels) ? data.labels : (data.labels ? [data.labels] : []);
+
+              if (!title) {
+                core.warning(`Skipping ${f}: missing title`);
+                continue;
+              }
+
+              // Search for existing issue by exact title (open or closed)
+              const search = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} \"${title}\" in:title is:issue`
+              });
+              const exists = search.data.items.find(i => i.title === title);
+              if (exists) {
+                core.info(`Exists, skipping: ${title}`);
+                continue;
+              }
+
+              core.info(`Creating: ${title}`);
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels
+              });
+            }
