@@ -2,7 +2,12 @@ name: Sync Markdown Issues
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "**" ]
+    paths:
+      - .github/issues/**
+      - .github/workflows/sync-issues.yml
+  pull_request:
+    branches: [ "**" ]
     paths:
       - .github/issues/**
       - .github/workflows/sync-issues.yml
